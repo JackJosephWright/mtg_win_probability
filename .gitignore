@@ -1,4 +1,5 @@
 
 data/raw_csv/*
+data/scryfall/oracle_cards.json
 *.pyc
 __pycache__/
