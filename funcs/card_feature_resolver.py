@@ -20,6 +20,7 @@ from card_attributes import (
     card_to_features, empty_features, minimal_card_attrs,
     FEATURE_NAMES, RARITY_MAP,
 )
+from turn_wr_estimator import TurnWREstimator
 
 
 class CardFeatureResolver:
@@ -41,6 +42,7 @@ class CardFeatureResolver:
         self.id_to_name = {}
         self.id_to_attrs = {}
         self._avg_features = None
+        self._turn_wr_estimator = None
 
         # Load Scryfall DB if available
         if scryfall_db_path is None:
@@ -103,6 +105,48 @@ class CardFeatureResolver:
 
         # Global average fallback
         return self._get_avg_features()
+
+    def resolve_with_turn_wr(self, turn, zone='board', card_id=None,
+                              card_name=None, **minimal_kwargs):
+        """
+        Resolve a card to features AND add an estimated turn-specific WR.
+
+        Adds 'estimated_turn_wr' to the feature dict based on the meta-model
+        that predicts WR from (card_attributes + turn_number).
+
+        Parameters:
+            turn: current turn number
+            zone: 'board' or 'hand' -- hand cards get a penalty for uncastable CMC
+            card_id, card_name, **minimal_kwargs: same as resolve()
+
+        Returns:
+            dict: feature dict with 'estimated_turn_wr' added
+        """
+        feats = self.resolve(card_id=card_id, card_name=card_name, **minimal_kwargs)
+
+        # Lazy-load estimator
+        if self._turn_wr_estimator is None:
+            try:
+                self._turn_wr_estimator = TurnWREstimator()
+            except FileNotFoundError:
+                feats['estimated_turn_wr'] = np.nan
+                return feats
+
+        if zone == 'hand':
+            # For hand: penalize cards that can't be cast yet
+            cmc = feats.get('cmc', 0) or 0
+            if cmc > turn:
+                # Stuck in hand -- use hand penalty heuristic
+                turns_until_castable = cmc - turn
+                feats['estimated_turn_wr'] = max(0.35, 0.5 - turns_until_castable * 0.02)
+            else:
+                # Castable -- estimate as if it were on board
+                feats['estimated_turn_wr'] = self._turn_wr_estimator.estimate_from_features(feats, turn)
+        else:
+            # Board: use meta-model directly
+            feats['estimated_turn_wr'] = self._turn_wr_estimator.estimate_from_features(feats, turn)
+
+        return feats
 
     def resolve_nan(self):
         """Returns NaN features for an empty card slot."""
