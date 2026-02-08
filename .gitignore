@@ -1,8 +1,7 @@
 
 data/raw_csv/*
-data/processed_csv/multi_set_turns*.parquet
+data/processed_csv/multi_set_turns.parquet
 data/processed_csv/turns_*.parquet
 data/scryfall/oracle_cards.json
-models/board_eval/*.pkl
 *.pyc
 __pycache__/

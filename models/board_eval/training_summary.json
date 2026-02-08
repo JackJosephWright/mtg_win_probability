@@ -1,0 +1,24 @@
+{
+  "total_rows": 5993014,
+  "total_games": 119997,
+  "sets": {
+    "STX": 829644,
+    "SNC": 525920,
+    "MKM": 518625,
+    "MOM": 506359,
+    "LCI": 506277,
+    "WOE": 499455,
+    "OTJ": 498818,
+    "FDN": 498062,
+    "DMU": 497335,
+    "DSK": 494273,
+    "BLB": 476665,
+    "AFR": 141581
+  },
+  "n_features": 104,
+  "test_accuracy": 0.7124,
+  "test_auc": 0.7942,
+  "test_brier": 0.1815,
+  "test_log_loss": 0.5324,
+  "train_time_seconds": 91.7
+}
