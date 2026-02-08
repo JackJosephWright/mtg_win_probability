@@ -288,7 +288,7 @@ def process_set(filepath, cached, games_per_set, max_turns, output_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--games-per-set', type=int, default=3000)
+    parser.add_argument('--games-per-set', type=int, default=10000)
     parser.add_argument('--max-turns', type=int, default=15)
     parser.add_argument('--output', type=str, default='data/processed_csv/multi_set_turns.parquet')
     args = parser.parse_args()

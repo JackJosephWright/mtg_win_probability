@@ -1,59 +1,24 @@
 # Board Evaluator - Local Setup
 
-## Quick Start
+## 3-Step Pipeline
 
-### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
+
+# Step 1: Download 17Lands replay data (~3.5GB, 7 sets)
+python main/download_data.py
+
+# Step 2: Process into training features (~15-30 min)
+python -u main/process_multi_set.py --games-per-set 10000
+
+# Step 3: Train XGBoost model (~1-2 min)
+python main/train_board_eval.py
 ```
 
-### 2. Download replay data from 17Lands
-Download replay data for multiple sets. More sets = better model.
+That's it. You'll have a trained model at `models/board_eval/board_eval_xgb.pkl`.
 
-```bash
-mkdir -p data/raw_csv
-cd data/raw_csv
+## Use in Bot
 
-# Download these (each ~400-600MB compressed):
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.DSK.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.FDN.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.BLB.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.OTJ.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.MKM.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.WOE.PremierDraft.csv.gz"
-curl -LO "https://17lands-public.s3.amazonaws.com/analysis_data/replay_data/replay_data_public.LCI.PremierDraft.csv.gz"
-
-cd ../..
-```
-
-### 3. Process replay data into training features
-This transforms raw replay data into turn-level rows with zone aggregate features.
-Uses a card resolution cache so it only does Scryfall lookup once per unique card.
-
-```bash
-python -u main/process_multi_set.py --games-per-set 5000 --max-turns 15
-```
-
-**Expected output**: `data/processed_csv/multi_set_turns.parquet`
-- ~7 sets x 5000 drafts x 6 games x 7 turns = ~1.5M turn rows
-- ~120 feature columns (zone aggregates + action features + scalars)
-- Takes ~15-30 min depending on CPU, needs ~4-8GB RAM
-
-**Tune the parameters:**
-- `--games-per-set 10000` for more data (better model, slower)
-- `--games-per-set 1000` for a quick test run
-
-### 4. Train the XGBoost board evaluation model
-```bash
-python main/train_board_eval.py --input data/processed_csv/multi_set_turns.parquet
-```
-
-**Expected output**: `models/board_eval/board_eval_xgb.pkl`
-- Trains XGBoost with game-level split (no data leakage)
-- Prints AUC, Brier score, per-turn metrics, feature importances
-- Target: AUC > 0.75, Brier < 0.20
-
-### 5. Use the BoardEvaluator in your bot
 ```python
 import sys
 sys.path.insert(0, 'funcs')
@@ -61,7 +26,7 @@ from board_evaluator import BoardEvaluator
 
 evaluator = BoardEvaluator()
 
-# Full board evaluation
+# Full board evaluation -> win probability [0.0, 1.0]
 score = evaluator.evaluate({
     'turn': 5,
     'user_life': 18,
@@ -78,52 +43,66 @@ score = evaluator.evaluate({
 })
 print(f"Win probability: {score:.1%}")
 
-# Quick card scoring (turn-WR meta-model, no board context)
+# Quick card scoring (context-free, fast pre-filter)
 scores = evaluator.score_cards(5, ['Lightning Bolt', 'Tarmogoyf', 'Forest'])
-print(scores)
 
-# Batch evaluation (faster for comparing multiple hypothetical states)
-states = [state_after_play_A, state_after_play_B, state_after_play_C]
-probs = evaluator.evaluate_batch(states)
-best = max(zip(probs, ['A', 'B', 'C']))
+# Batch evaluation (compare hypothetical plays)
+probs = evaluator.evaluate_batch([state_A, state_B, state_C])
+```
+
+## Options
+
+**Download more/fewer sets:**
+```bash
+python main/download_data.py --list               # see all available sets
+python main/download_data.py --sets DSK FDN BLB   # specific sets
+python main/download_data.py --all                 # every available set
+```
+
+**Process more/fewer games:**
+```bash
+python -u main/process_multi_set.py --games-per-set 20000  # more data, better model
+python -u main/process_multi_set.py --games-per-set 1000   # quick test
 ```
 
 ## Architecture
 
 ```
-17Lands replay data (game-per-row, ~1M games per set)
-    |
+17Lands replay data (game-per-row, ~1M games/set)
+    |  download_data.py
     v
-process_multi_set.py  -- samples games, resolves cards via Scryfall, extracts zone aggregates
-    |
+data/raw_csv/*.csv.gz
+    |  process_multi_set.py (card resolution cache, zone aggregates)
     v
-multi_set_turns.parquet  -- turn-per-row, ~120 features
-    |
+data/processed_csv/multi_set_turns.parquet (~120 features/row)
+    |  train_board_eval.py (XGBoost, game-level split)
     v
-train_board_eval.py  -- XGBoost with game-level split
-    |
-    v
-board_eval_xgb.pkl  -- saved model
+models/board_eval/board_eval_xgb.pkl
     |
     v
 BoardEvaluator.evaluate(board_state) -> win probability
+BoardEvaluator.score_cards(turn, cards) -> card scores
 ```
 
-## Feature Types
+## Features (~120 total)
 
-**Zone aggregates (17 per zone x 5 zones = 85):**
-count, total_power, total_toughness, total_cmc, total_loyalty, avg_cmc,
+**Zone aggregates (17 features x 5 zones = 85):**
+Cards are resolved via Scryfall DB to attributes, then aggregated per zone.
+Zones: user_hand, user_creatures, user_non_creatures, oppo_creatures, oppo_non_creatures
+
+Per zone: count, total_power, total_toughness, total_cmc, total_loyalty, avg_cmc,
 flyer_count, deathtouch_count, lifelink_count, haste_count, hexproof_count,
 indestructible_count, removal_count, etb_count, draw_count,
 planeswalker_count, creature_count
 
 **Scalar features (~10):**
-turn, on_play, user_life, oppo_life, user_lands_in_play, oppo_lands_in_play,
+turn, on_play, user_life, oppo_life, user_lands, oppo_lands,
 oppo_cards_in_hand, life_diff, land_diff
 
 **Action features (~12):**
-user/oppo_total_mana_spent, total_combat_dmg_dealt, total_combat_dmg_taken,
-total_creatures_killed, total_creatures_lost, creatures_attacked
+Cumulative per game: mana_spent, combat_dmg_dealt, combat_dmg_taken,
+creatures_killed, creatures_lost, creatures_attacked (for both players)
 
-**Card scorer (separate model):**
-turn-WR meta-model predicts card value from Scryfall attributes + turn number
+**Card scorer** (separate turn-WR meta-model):
+Predicts card value from Scryfall attributes + turn number.
+Used for fast pre-filtering before full board evaluation.

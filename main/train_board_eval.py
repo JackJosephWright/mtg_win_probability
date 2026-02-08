@@ -157,6 +157,22 @@ def train_and_evaluate(input_path, output_dir):
     with open(cols_path, 'wb') as f:
         pickle.dump(feature_cols, f)
 
+    # Save training summary
+    import json
+    summary = {
+        'total_rows': len(df),
+        'total_games': int(df['game_id'].nunique()),
+        'sets': df['expansion'].value_counts().to_dict(),
+        'n_features': len(feature_cols),
+        'test_accuracy': round(acc, 4),
+        'test_auc': round(auc, 4),
+        'test_brier': round(brier, 4),
+        'test_log_loss': round(ll, 4),
+        'train_time_seconds': round(train_time, 1),
+    }
+    with open(os.path.join(output_dir, 'training_summary.json'), 'w') as f:
+        json.dump(summary, f, indent=2)
+
     print(f"\nModel saved to {model_path}")
     print(f"Feature columns saved to {cols_path}")
 
