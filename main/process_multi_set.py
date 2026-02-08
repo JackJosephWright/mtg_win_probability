@@ -28,8 +28,11 @@ from card_feature_resolver import CardFeatureResolver
 from card_attributes import FEATURE_NAMES, empty_features
 
 META_COLS = [
-    'expansion', 'draft_id', 'on_play', 'num_turns', 'won',
+    'expansion', 'on_play', 'won',
 ]
+# These columns have different names across set vintages
+ID_COL_CANDIDATES = ['draft_id', 'history_id']
+TURNS_COL_CANDIDATES = ['num_turns', 'turns']
 
 EOT_CARD_ZONES = {
     'user_hand': ('user', 'eot_user_cards_in_hand'),
@@ -66,6 +69,15 @@ class CachedResolver:
         total = self.hits + self.misses
         rate = self.hits / total * 100 if total > 0 else 0
         return f"Cache: {len(self._cache)} unique, {rate:.0f}% hit ({self.hits}/{total})"
+
+
+def _safe_float(val, default=0.0):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def _count_pipe(val):
@@ -187,14 +199,12 @@ def transform_game(row, cached, max_turns=15):
 
         # Cumulative action features
         for p in ['user', 'oppo']:
-            tm, tdd, tdt, tk, tl = 0.0, 0.0, 0.0, 0, 0
+            tm, tdd, tk, tl = 0.0, 0.0, 0, 0
             for ti in range(1, turn + 1):
                 m = row.get(f'{p}_turn_{ti}_{p}_mana_spent', 0)
-                tm += float(m) if not pd.isna(m) else 0
-                dd = row.get(f'{p}_turn_{ti}_oppo_combat_damage_taken', 0)
-                tdd += float(dd) if not pd.isna(dd) else 0
-                dt = row.get(f'{p}_turn_{ti}_user_combat_damage_taken', 0)
-                tdt += float(dt) if not pd.isna(dt) else 0
+                tm += _safe_float(m)
+                dd = row.get(f'{p}_turn_{ti}_player_combat_damage_dealt', 0)
+                tdd += _safe_float(dd)
                 tk += _count_pipe(row.get(f'{p}_turn_{ti}_oppo_creatures_killed_combat', None))
                 tk += _count_pipe(row.get(f'{p}_turn_{ti}_oppo_creatures_killed_non_combat', None))
                 tl += _count_pipe(row.get(f'{p}_turn_{ti}_user_creatures_killed_combat', None))
@@ -202,15 +212,20 @@ def transform_game(row, cached, max_turns=15):
 
             t[f'{p}_total_mana_spent'] = tm
             t[f'{p}_total_combat_dmg_dealt'] = tdd
-            t[f'{p}_total_combat_dmg_taken'] = tdt
             t[f'{p}_total_creatures_killed'] = tk
             t[f'{p}_total_creatures_lost'] = tl
             t[f'{p}_creatures_attacked'] = _count_pipe(
                 row.get(f'{p}_turn_{turn}_creatures_attacked', None))
 
         # Derived
-        ul = t.get('user_life', 20) or 20
-        ol = t.get('oppo_life', 20) or 20
+        try:
+            ul = float(t.get('user_life', 20) or 20)
+        except (ValueError, TypeError):
+            ul = 20.0
+        try:
+            ol = float(t.get('oppo_life', 20) or 20)
+        except (ValueError, TypeError):
+            ol = 20.0
         t['life_diff'] = ul - ol
         t['land_diff'] = (t.get('user_lands_in_play', 0) or 0) - (t.get('oppo_lands_in_play', 0) or 0)
 
@@ -222,7 +237,7 @@ def get_needed_columns(max_turns=15):
     cols = list(META_COLS)
     action_suffixes = [
         'user_mana_spent', 'oppo_mana_spent',
-        'oppo_combat_damage_taken', 'user_combat_damage_taken',
+        'player_combat_damage_dealt',
         'oppo_creatures_killed_combat', 'user_creatures_killed_combat',
         'oppo_creatures_killed_non_combat', 'user_creatures_killed_non_combat',
         'creatures_attacked',
@@ -250,7 +265,17 @@ def process_set(filepath, cached, games_per_set, max_turns, output_dir):
 
     needed = get_needed_columns(max_turns)
     header_cols = pd.read_csv(filepath, nrows=0).columns.tolist()
-    use_cols = [c for c in needed if c in header_cols]
+
+    # Detect which ID and turns columns this set uses
+    id_col = next((c for c in ID_COL_CANDIDATES if c in header_cols), None)
+    turns_col = next((c for c in TURNS_COL_CANDIDATES if c in header_cols), None)
+    if not id_col or not turns_col:
+        print(f"  SKIP: missing id_col={id_col} turns_col={turns_col}", flush=True)
+        return None
+    print(f"  Using id_col={id_col}, turns_col={turns_col}", flush=True)
+
+    use_cols = [c for c in needed if c in header_cols] + [id_col, turns_col]
+    use_cols = list(dict.fromkeys(use_cols))  # dedupe preserving order
 
     read_rows = games_per_set * 8
     print(f"  Reading {read_rows:,} rows, {len(use_cols)} cols ...", flush=True)
@@ -260,6 +285,12 @@ def process_set(filepath, cached, games_per_set, max_turns, output_dir):
     except Exception:
         raw = pd.read_csv(filepath, nrows=read_rows, low_memory=False)
         raw = raw[[c for c in use_cols if c in raw.columns]]
+
+    # Normalize column names to canonical form
+    if id_col != 'draft_id':
+        raw = raw.rename(columns={id_col: 'draft_id'})
+    if turns_col != 'num_turns':
+        raw = raw.rename(columns={turns_col: 'num_turns'})
 
     unique_drafts = raw['draft_id'].unique()
     rng = np.random.RandomState(42)
@@ -279,6 +310,11 @@ def process_set(filepath, cached, games_per_set, max_turns, output_dir):
 
     out = output_dir / f'turns_{set_code}.parquet'
     df = pd.DataFrame(all_turns)
+    # Coerce columns that should be numeric (life totals etc. can come in as strings)
+    for col in df.columns:
+        if col in ('game_id', 'expansion'):
+            continue
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     df.to_parquet(str(out), index=False)
     print(f"  Saved {out.name} ({out.stat().st_size / 1e6:.1f} MB, {len(df.columns)} cols)", flush=True)
 
@@ -306,10 +342,14 @@ def main():
 
     pq_files = []
     for f in files:
-        pq_files.append(process_set(f, cached, args.games_per_set, args.max_turns, output_dir))
+        result = process_set(f, cached, args.games_per_set, args.max_turns, output_dir)
+        if result is not None:
+            pq_files.append(result)
 
     print(f"\nCombining {len(pq_files)} files ...", flush=True)
     combined = pd.concat([pd.read_parquet(str(p)) for p in pq_files], ignore_index=True)
+    # Normalize game_id to string (mixed int/str across set vintages)
+    combined['game_id'] = combined['game_id'].astype(str)
     print(f"Combined: {len(combined):,} turns, {combined['game_id'].nunique():,} games, {len(combined.columns)} cols", flush=True)
     print(f"Sets: {combined['expansion'].value_counts().to_dict()}", flush=True)
 

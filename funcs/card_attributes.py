@@ -74,11 +74,14 @@ def card_to_features(card_attrs):
     is_colorless = 1 if color_count == 0 else 0
 
     # Type line parsing
-    type_line = (card_attrs.get('type_line', '') or '').lower()
+    _tl = card_attrs.get('type_line', '')
+    type_line = ('' if not isinstance(_tl, str) else _tl).lower()
 
     # Keywords (from Scryfall keywords list + oracle text fallback)
-    keywords_list = [k.lower() for k in (card_attrs.get('keywords', []) or [])]
-    oracle = (card_attrs.get('oracle_text', '') or '').lower()
+    _kw = card_attrs.get('keywords', [])
+    keywords_list = [k.lower() for k in (_kw if isinstance(_kw, list) else [])]
+    _or = card_attrs.get('oracle_text', '')
+    oracle = ('' if not isinstance(_or, str) else _or).lower()
     # Also check oracle text for keywords (Scryfall sometimes misses them)
     all_kw_text = ' '.join(keywords_list) + ' ' + oracle
 
